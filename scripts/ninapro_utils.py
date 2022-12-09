@@ -26,6 +26,7 @@ import numpy as np
 import math
 import matplotlib.pyplot as plt
 import h5py
+from scipy import signal
 
 def get_ninapro(path, filename):
     """将ninapro的MAT文件加载为字典
@@ -118,65 +119,27 @@ def merge_exercise(E1, E2):
     E1_label = E1['restimulus']
     E2_label = E2['restimulus']
 
-    index1 =[]
-    for i in range(len(E1_label)):
-        if E1_label[i]!=0:
-            index1.append(i)
-    label1 = E1_label[index1,:]
-    emg1 = E1_emg[index1,:]
-
-    index2 =[]
-    for i in range(len(E2_label)):
-        if E2_label[i]!=0:
-            index2.append(i)
-    label2 = E2_label[index2,:]
-    emg2 = E2_emg[index2,:]
-
-    emg = np.vstack((emg1,emg2))
-    label = np.vstack((label1,label2))
+    emg = np.vstack((E1_emg,E2_emg))
+    label = np.vstack((E1_label,E2_label))
     label = label-1
 
     print('[ok]:emg shape:',end='')
     print(emg.shape,flush=True)
     return emg, label
 
-def generate_image(emg,label):
-    """将EMG数据切片，准备送入神经网络
+def emg_filter(emg):
+    fs = 2000.0
+    f0 = 50.0
+    Q = 30.0
+    b, a = signal.iirnotch(f0, Q, fs)
+    emg = signal.filtfilt(b, a, emg, axis=0)
+    b, a = signal.butter(8, [20/fs, 900/fs], 'bandpass')
+    emg = signal.filtfilt(b, a, emg, axis=0)
+    return emg
 
-    Args:
-        emg: EMG数据（12列）
-        label: 对应刺激的序号
-       
-    Returns:
-        [imagedata, label]: 切片数据和对应刺激的序号
-    """
 
-    emg = emg*20000
 
-    imageData=[]
-    imageLabel=[]
-    imageLength=200
-    classes = 40
 
-    for i in range(classes):
-        index = []
-        for j in range(label.shape[0]):
-            if(label[j,:]==i):
-                index.append(j)
-                
-        iemg = emg[index,:]
-        length = math.floor((iemg.shape[0]-imageLength)/imageLength)
-        #print("class ",i," number of sample: ",iemg.shape[0],length)
-        print('\rgenerate emg matrix data...',end='',flush=True)
-        print('[%d/%d]'%(i,classes),end='',flush=True)
-        for j in range(length):
-            subImage = iemg[imageLength*j:imageLength*(j+1),:]
-            imageData.append(subImage)
-            imageLabel.append(i)    
-    imageData = np.array(imageData)
-    imageLabel = np.array(imageLabel)
-    print('\rgenerate emg matrix data...[ok]',imageData.shape,', ',imageLabel.shape,end='\n',flush=True)
-    return imageData, imageLabel
 
 def save_h5data(filename, data ,label):
     """将提取的数据暂存为h5文件
@@ -198,14 +161,70 @@ def pretreatment_ninapro(db7_path, num_subject):
         db7_path: 数据集路径
         num_subject: 测试人数
     """
+    
     for i in range(1, num_subject + 1):
+        data = None
+        label = None
         print('---subject%d---'%i,flush=True)
         # 读取exerciese1和exerciese2的数据
         e1_raw = get_ninapro(db7_path + 'Subject_{0}/'.format(i),'S{0}_E1_A1.mat'.format(i))
         e2_raw = get_ninapro(db7_path + 'Subject_{0}/'.format(i),'S{0}_E2_A1.mat'.format(i))
         # 合并数据
-        emg, label = merge_exercise(e1_raw,e2_raw)
+        raw_emg, raw_label = merge_exercise(e1_raw,e2_raw)
+        raw_emg = raw_emg.swapaxes(0,1)
+        # 数据滤波
+        print('filter emg data...',end='',flush=True)
+        k = 0
+        for emg_sig in raw_emg:
+            raw_emg[k,:] = emg_filter(emg_sig)
+            k+=1
+        raw_emg = raw_emg.swapaxes(0,1)
+        print('[ok]',raw_emg.shape)
         # 截断数据生成训练所需的EMG数据片段
-        emg_image, emg_label = generate_image(emg, label)
+        if(label is None):
+            label = raw_label
+            data = raw_emg
+        else:
+            label = np.vstack((label,raw_label))
+            data = np.vstack((data,raw_emg))
         # 保存EMG数据和label
-        save_h5data('data/s{0}.h5'.format(i),emg_image, emg_label)
+        print('saving file:','data/s{0}_f.h5'.format(i),'...',end='',flush=True)
+        save_h5data('data/s{0}_f.h5'.format(i),data, label)
+        print('ok')
+
+def read_data(filename):
+    print('open h5 file:%s...'%(filename),end='',flush=True)
+    with h5py.File(filename,'r') as f:
+        imageData   = f['featureData'][:]
+        imageLabel  = f['featureLabel'][:] 
+        print('[ok]',end='')
+        print('data:', imageData.shape,', label:',end='')
+        print(imageLabel.shape, flush=True)
+        return imageData,imageLabel
+
+
+def emg_dataset_split(filepath,savepath):
+    windows_size = 256
+    d0,l0 = read_data(filepath)
+    emg_data = np.zeros((int(len(l0)/256),256,12))
+    label = None
+    i=0
+    j=1
+    while(i<len(l0)-windows_size):
+        if(l0[i]!=-1 and l0[i:i+windows_size].all() == np.full(windows_size, l0[i]).all()):
+            emg_temp = np.expand_dims(d0[i:i+windows_size,:], axis=0)
+            if(label is None):
+                label = l0[i]
+                emg_data[0,:,:] = emg_temp
+            else:
+                emg_data[label.shape[0],:,:] = emg_temp
+                label = np.vstack((label,l0[i]))
+            i+=windows_size
+        i+=1
+        if(int(i/1000000)==j):
+            j=j+1
+            print('[{0}/{1} {2}]'.format(i,len(l0),i*100/len(l0)),'label shape:',label.shape,'  emg shape:',emg_data.shape)
+    
+    emg_data = emg_data[:label.shape[0],:,:]
+    print('label size:',label.shape, 'emg size:',emg_data.shape)
+    save_h5data(savepath,emg_data, label)

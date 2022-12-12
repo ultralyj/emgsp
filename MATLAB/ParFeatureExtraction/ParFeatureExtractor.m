@@ -70,8 +70,9 @@ parfor winInd = 1:numwin-winsize,
 
     if mod(winInd-1,wininc)==0,
         %h=waitbar(winInd/numwin);
-        disp(['Feature Extraction Progress: ' num2str(round(winInd*10000/numwin)/100) '%']);
-
+        if mod(winInd-1,wininc*10)==0,
+            disp(['Feature Extraction Progress: ' num2str(round(winInd*10000/numwin)/100) '%']);
+        end
         
         
         curStimWin=stimulus(winInd:winInd+winsize,:);
